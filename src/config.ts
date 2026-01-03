@@ -2,11 +2,25 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-type ConfigFile = Partial<Config>;
+type ConfigFile = Partial<RawConfig>;
+
+export type CacheConfig = {
+  enabled: boolean;
+  ttl: number;
+};
 
 export type Config = {
   dryRun: boolean;
-  cache: boolean;
+  cache: CacheConfig;
+  bot?: string;
+  token?: string;
+};
+
+type RawCache = boolean | Partial<CacheConfig>;
+
+type RawConfig = {
+  dryRun?: boolean;
+  cache?: RawCache;
   bot?: string;
   token?: string;
 };
@@ -20,7 +34,10 @@ export type CliFlags = {
 
 const DEFAULT_CONFIG: Config = {
   dryRun: false,
-  cache: true,
+  cache: {
+    enabled: true,
+    ttl: 3600
+  },
   bot: undefined,
   token: undefined
 };
@@ -62,18 +79,37 @@ const loadConfigFromFiles = async (cwd: string): Promise<ConfigFile> => {
 };
 
 const loadConfigFromEnv = (): ConfigFile => {
+  const cacheTtl = envNumber(process.env.REVIEW_TUI_CACHE_TTL);
   return {
     dryRun: envBoolean(process.env.REVIEW_TUI_DRY_RUN),
-    cache: envBoolean(process.env.REVIEW_TUI_CACHE),
+    cache:
+      cacheTtl !== undefined
+        ? { enabled: envBoolean(process.env.REVIEW_TUI_CACHE), ttl: cacheTtl }
+        : envBoolean(process.env.REVIEW_TUI_CACHE),
     bot: process.env.REVIEW_TUI_BOT,
     token: process.env.REVIEW_TUI_TOKEN
   };
 };
 
-const applyDefined = <T extends Record<string, unknown>>(base: T, next: T): T => {
-  const merged = { ...base };
-  for (const [key, value] of Object.entries(next)) {
-    if (value !== undefined) merged[key] = value;
+const envNumber = (value: string | undefined): number | undefined => {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const normalizeCache = (value: RawCache | undefined): Partial<CacheConfig> => {
+  if (value === undefined) return {};
+  if (typeof value === "boolean") return { enabled: value };
+  return value;
+};
+
+const mergeConfig = (base: RawConfig, next: RawConfig): RawConfig => {
+  const merged: RawConfig = { ...base, ...next };
+  if (base.cache !== undefined || next.cache !== undefined) {
+    merged.cache = {
+      ...normalizeCache(base.cache),
+      ...normalizeCache(next.cache)
+    };
   }
   return merged;
 };
@@ -82,8 +118,25 @@ export const resolveConfig = async (cwd: string, flags: CliFlags): Promise<Confi
   const fileConfig = await loadConfigFromFiles(cwd);
   const envConfig = loadConfigFromEnv();
 
-  return applyDefined(
-    applyDefined(applyDefined(DEFAULT_CONFIG, fileConfig as Config), envConfig as Config),
-    flags as Config
+  const rawConfig = mergeConfig(
+    mergeConfig(mergeConfig(DEFAULT_CONFIG, fileConfig), envConfig),
+    {
+      dryRun: flags.dryRun,
+      cache: flags.cache,
+      bot: flags.bot,
+      token: flags.token
+    }
   );
+
+  const mergedCache = normalizeCache(rawConfig.cache);
+
+  return {
+    dryRun: rawConfig.dryRun ?? DEFAULT_CONFIG.dryRun,
+    cache: {
+      enabled: mergedCache.enabled ?? DEFAULT_CONFIG.cache.enabled,
+      ttl: mergedCache.ttl ?? DEFAULT_CONFIG.cache.ttl
+    },
+    bot: rawConfig.bot ?? DEFAULT_CONFIG.bot,
+    token: rawConfig.token ?? DEFAULT_CONFIG.token
+  };
 };
